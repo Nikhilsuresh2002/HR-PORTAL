@@ -1,0 +1,175 @@
+from django.shortcuts import render, redirect ,  get_object_or_404
+from django.contrib.auth import authenticate, login
+from django.contrib.auth import logout
+from django.contrib.auth.decorators import login_required
+from django.contrib import messages
+from .models import employee
+from client.models import Ticket
+from .models import Project
+from .models import Task
+from django.utils.timezone import now
+from django.http import JsonResponse
+from .models import TimeTracking
+from django.utils import timezone
+
+
+
+
+# Function to handle the home page and login functionality
+def home(request):
+    if request.method == "POST":
+        username = request.POST.get("username")
+        password = request.POST.get("password")
+        user = authenticate(request, username=username, password=password)
+        print("Authenticated user:", user)  # Debugging output
+
+        if user is not None:
+            login(request, user)
+            next_url = request.GET.get('next', 'employee')  # Redirect to the 'next' URL or 'employee'
+            return redirect(next_url)  # Redirects to the employee page
+        else:
+            messages.error(request, "Invalid username or password")
+            return redirect('home')  # Reload the login page
+    else:
+        return render(request, 'home.html')
+
+
+
+# Function to display the employee dashboard, accessible only to logged-in users
+@login_required
+def employee_view(request):
+    try:
+        # Fetch the logged-in user's associated employee details
+        employee_details = employee.objects.get(user=request.user)
+         
+    except employee.DoesNotExist:
+        employee_details = None  # Handle cases where the employee does not exist
+      
+    # Check if the employee has an active time tracking entry (clocked in but not clocked out)
+    active_time_tracking = TimeTracking.objects.filter(employee=request.user, clock_out=None).exists() if employee else False
+
+    # Fetch the latest time tracking entry for the user
+    latest_time_tracking = TimeTracking.objects.filter(employee=request.user).order_by('-clock_in').first()
+
+    
+    # Get the total_time for the latest time tracking record
+    total_hours_readable = None
+    if latest_time_tracking and latest_time_tracking.total_time:
+        # Convert the total_time to a human-readable format
+        total_time = latest_time_tracking.total_time
+        total_hours_readable = f"{total_time.days * 24 + total_time.seconds // 3600}h {total_time.seconds % 3600 // 60}m"
+
+
+
+    context = {
+        'employee': employee_details,  # Pass the employee object to the template
+         'active_time_tracking': active_time_tracking,
+        'latest_time_tracking': latest_time_tracking,  # Pass the latest time tracking details to the template
+        'total_hours': total_hours_readable,  # Pass the total hours in human-readable format
+    }
+    
+    return render(request, 'employee.html', context)
+
+
+# Function to log out the employee
+@login_required
+def logout_view(request):
+    logout(request)
+    return redirect('home') 
+
+# Function to display tickets assigned to the logged-in user
+@login_required
+def assigned_tickets(request):
+    tickets = Ticket.objects.filter(assigned_to=request.user, status__in=['Pending', 'In Progress'])
+    return render(request, 'assigned_tickets.html', {'tickets': tickets})
+
+
+
+# Function to mark a ticket as completed, accessible only to logged-in users
+@login_required
+def mark_ticket_completed(request, ticket_id):
+    ticket = Ticket.objects.get(id=ticket_id, assigned_to=request.user)
+    ticket.status = 'Completed'
+    ticket.save()
+    return redirect('assigned_tickets')
+
+
+
+def projects_view(request):
+    try:
+        employee_obj = employee.objects.get(user=request.user)
+        projects = Project.objects.filter(employees=employee_obj)
+    except employee.DoesNotExist:
+        projects = []
+    return render(request, 'project.html', {'projects': projects})
+
+
+def task_page(request):
+    if request.user.is_authenticated:
+        try:
+            # Get the employee object associated with the logged-in user
+            employee = request.user.employee  # Assuming Employee model is linked to User model via OneToOneField
+
+            # Filter tasks assigned to the logged-in employee
+            pending_tasks = Task.objects.filter(employees=employee, status='Pending')
+            completed_tasks = Task.objects.filter(employees=employee, status='Completed')
+
+        except AttributeError:
+            # Handle case where the logged-in user doesn't have an associated employee
+            pending_tasks = []
+            completed_tasks = []
+
+        return render(request, 'tasks.html', {'pending_tasks': pending_tasks, 'completed_tasks': completed_tasks})
+    else:
+        # Redirect to login page if the user is not authenticated
+        return redirect('login')
+
+
+
+
+
+def mark_task_completed(request, task_id):
+    task = get_object_or_404(Task, id=task_id)
+    task.status = 'Completed'
+    task.completed_date = now()
+    task.save()
+    return redirect('task_page')  # Redirect back to the task page
+
+
+
+def upload_file(request, task_id):
+    task = get_object_or_404(Task, id=task_id)
+    if request.method == 'POST' and request.FILES.get('file'):
+        task.uploaded_file = request.FILES['file']
+        task.save()
+    return redirect('task_page')
+
+
+
+
+
+@login_required
+def clock_in(request):
+    employee = request.user
+    existing_entry = TimeTracking.objects.filter(employee=employee, clock_out=None).first()
+    
+    if existing_entry:
+        # If already clocked in, return a message or do something
+        pass
+    else:
+        new_entry = TimeTracking(employee=employee, clock_in=timezone.now())
+        new_entry.save()
+    
+    return redirect('employee')  # Redirect to employee dashboard or wherever
+
+@login_required
+def clock_out(request):
+    employee = request.user
+    entry = TimeTracking.objects.filter(employee=employee, clock_out=None).first()
+    
+    if entry:
+        entry.clock_out = timezone.now()
+        entry.total_time = entry.calculate_time()
+        entry.save()
+
+    return redirect('employee')  # Redirect to employee dashboard or wherever
