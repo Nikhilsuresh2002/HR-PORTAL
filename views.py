@@ -1,175 +1,175 @@
-from django.shortcuts import render, redirect ,  get_object_or_404
+from django.http import HttpResponse
 from django.contrib.auth import authenticate, login
-from django.contrib.auth import logout
-from django.contrib.auth.decorators import login_required
+from django.shortcuts import render, redirect ,  get_object_or_404
 from django.contrib import messages
-from .models import employee
-from client.models import Ticket
-from .models import Project
-from .models import Task
-from django.utils.timezone import now
-from django.http import JsonResponse
-from .models import TimeTracking
-from django.utils import timezone
+from .models import Client
+from .models import Project , Payment
+import paypalrestsdk
+from django.urls import reverse
+from django.conf import settings
+from .forms import TicketForm
+from .models import Ticket 
+from django.contrib.auth.decorators import login_required
+from django.http import FileResponse, Http404
+import os
 
 
 
 
-# Function to handle the home page and login functionality
-def home(request):
-    if request.method == "POST":
-        username = request.POST.get("username")
-        password = request.POST.get("password")
+# PayPal SDK Configuration
+paypalrestsdk.configure({
+    "mode": settings.PAYPAL_MODE,  # 'sandbox' for dummy, 'live' for real
+    "client_id": settings.PAYPAL_CLIENT_ID,
+    "client_secret": settings.PAYPAL_CLIENT_SECRET,
+})
+
+
+
+# Client Login View
+def client_login(request):
+    if request.method == 'POST':
+        username = request.POST['username']
+        password = request.POST['password']
         user = authenticate(request, username=username, password=password)
-        print("Authenticated user:", user)  # Debugging output
-
-        if user is not None:
-            login(request, user)
-            next_url = request.GET.get('next', 'employee')  # Redirect to the 'next' URL or 'employee'
-            return redirect(next_url)  # Redirects to the employee page
-        else:
-            messages.error(request, "Invalid username or password")
-            return redirect('home')  # Reload the login page
-    else:
-        return render(request, 'home.html')
-
-
-
-# Function to display the employee dashboard, accessible only to logged-in users
-@login_required
-def employee_view(request):
-    try:
-        # Fetch the logged-in user's associated employee details
-        employee_details = employee.objects.get(user=request.user)
-         
-    except employee.DoesNotExist:
-        employee_details = None  # Handle cases where the employee does not exist
-      
-    # Check if the employee has an active time tracking entry (clocked in but not clocked out)
-    active_time_tracking = TimeTracking.objects.filter(employee=request.user, clock_out=None).exists() if employee else False
-
-    # Fetch the latest time tracking entry for the user
-    latest_time_tracking = TimeTracking.objects.filter(employee=request.user).order_by('-clock_in').first()
-
-    
-    # Get the total_time for the latest time tracking record
-    total_hours_readable = None
-    if latest_time_tracking and latest_time_tracking.total_time:
-        # Convert the total_time to a human-readable format
-        total_time = latest_time_tracking.total_time
-        total_hours_readable = f"{total_time.days * 24 + total_time.seconds // 3600}h {total_time.seconds % 3600 // 60}m"
-
-
-
-    context = {
-        'employee': employee_details,  # Pass the employee object to the template
-         'active_time_tracking': active_time_tracking,
-        'latest_time_tracking': latest_time_tracking,  # Pass the latest time tracking details to the template
-        'total_hours': total_hours_readable,  # Pass the total hours in human-readable format
-    }
-    
-    return render(request, 'employee.html', context)
-
-
-# Function to log out the employee
-@login_required
-def logout_view(request):
-    logout(request)
-    return redirect('home') 
-
-# Function to display tickets assigned to the logged-in user
-@login_required
-def assigned_tickets(request):
-    tickets = Ticket.objects.filter(assigned_to=request.user, status__in=['Pending', 'In Progress'])
-    return render(request, 'assigned_tickets.html', {'tickets': tickets})
-
-
-
-# Function to mark a ticket as completed, accessible only to logged-in users
-@login_required
-def mark_ticket_completed(request, ticket_id):
-    ticket = Ticket.objects.get(id=ticket_id, assigned_to=request.user)
-    ticket.status = 'Completed'
-    ticket.save()
-    return redirect('assigned_tickets')
-
-
-
-def projects_view(request):
-    try:
-        employee_obj = employee.objects.get(user=request.user)
-        projects = Project.objects.filter(employees=employee_obj)
-    except employee.DoesNotExist:
-        projects = []
-    return render(request, 'project.html', {'projects': projects})
-
-
-def task_page(request):
-    if request.user.is_authenticated:
+        
+        login(request, user)
+        print(user)
+        # Validate credentials
         try:
-            # Get the employee object associated with the logged-in user
-            employee = request.user.employee  # Assuming Employee model is linked to User model via OneToOneField
+            client = Client.objects.get(username=username, password=password)
+            request.session['client_id'] = client.id  # Store client ID in session
+            return redirect('client_home')  # Redirect to client home page
+        except Client.DoesNotExist:
+            messages.error(request, 'Invalid username or password')
 
-            # Filter tasks assigned to the logged-in employee
-            pending_tasks = Task.objects.filter(employees=employee, status='Pending')
-            completed_tasks = Task.objects.filter(employees=employee, status='Completed')
+    return render(request, 'client_login.html')  # Corrected templ
 
-        except AttributeError:
-            # Handle case where the logged-in user doesn't have an associated employee
-            pending_tasks = []
-            completed_tasks = []
 
-        return render(request, 'tasks.html', {'pending_tasks': pending_tasks, 'completed_tasks': completed_tasks})
+
+# Client Home View
+def client_home(request):
+    client_id = request.session.get('client_id')
+    if not client_id:
+        return redirect('client_login')  # Redirect to login if no session exists
+
+    client = Client.objects.get(id=client_id)
+    project = Project.objects.filter(client=client).first()  # Get the first project associated with the client
+    return render(request, 'client_home.html', {'client': client, 'project': project})
+
+
+
+
+# Client Logout View
+def client_logout(request):
+    if 'client_id' in request.session:
+        del request.session['client_id']
+    return redirect('client_login')  # Redirect to login after logout
+
+
+def project_details(request):
+        projects = Project.objects.all()
+        return render(request, 'project_details.html', {'projects': projects})
+
+
+def download_file(request, project_id):
+    try:
+        project = Project.objects.get(pk=project_id)
+        file_path = project.file_path.path  # Get the full file path
+        file_name = os.path.basename(file_path)  # Extract the file name
+        
+        # Serve the file as a response
+        response = FileResponse(open(file_path, 'rb'), as_attachment=True, filename=file_name)
+        return response
+    except Project.DoesNotExist:
+        raise Http404("Project not found.")
+    except Exception as e:
+        raise Http404(f"Error: {str(e)}")
+
+
+
+# View to show the payment confirmation page
+def show_payment_page(request, project_id):
+    project = get_object_or_404(Project, id=project_id)
+    return render(request, 'paypal_payment.html', {'project': project})
+
+
+
+# View to create and redirect to PayPal
+def create_paypal_payment(request, project_id):
+    project = get_object_or_404(Project, id=project_id)
+
+    # Create a PayPal Payment object dynamically
+    payment = paypalrestsdk.Payment({
+        "intent": "sale",
+        "payer": {"payment_method": "paypal"},
+        "redirect_urls": {
+            "return_url": request.build_absolute_uri(reverse('payment_success', args=[project_id])),
+            "cancel_url": request.build_absolute_uri(f"/client/payment_cancel/{project_id}/"),
+        },
+        "transactions": [{
+            "item_list": {
+                "items": [{
+                    "name": project.name,  # Project name dynamically
+                    "sku": f"project_{project.id}",  # Unique project ID
+                    "price": str(project.cost),  # Use `project.cost` dynamically
+                    "currency": "USD",
+                    "quantity": 1
+                }]
+            },
+            "amount": {"total": str(project.cost), "currency": "USD"},
+            "description": f"Payment for project: {project.name}"
+        }]
+    })
+
+    # Redirect to PayPal approval URL
+    if payment.create():
+        for link in payment.links:
+            if link.rel == "approval_url":
+                return redirect(link.href)  # Redirect to PayPal for approval
     else:
-        # Redirect to login page if the user is not authenticated
-        return redirect('login')
+        messages.error(request, "Error creating PayPal payment. Try again later.")
+        return redirect('client_home')
+
+
+# Payment Success View
+
+def payment_success(request, project_id):
+    project = get_object_or_404(Project, id=project_id)
+    
+    # Retrieve PayPal parameters from the GET request
+    payment_id = request.GET.get('paymentId')
+    token = request.GET.get('token')
+    payer_id = request.GET.get('PayerID')
+    
+    return render(request, 'payment_success.html', {'project': project})
 
 
 
-
-
-def mark_task_completed(request, task_id):
-    task = get_object_or_404(Task, id=task_id)
-    task.status = 'Completed'
-    task.completed_date = now()
-    task.save()
-    return redirect('task_page')  # Redirect back to the task page
-
-
-
-def upload_file(request, task_id):
-    task = get_object_or_404(Task, id=task_id)
-    if request.method == 'POST' and request.FILES.get('file'):
-        task.uploaded_file = request.FILES['file']
-        task.save()
-    return redirect('task_page')
-
-
-
-
+# Payment Cancel View
+def payment_cancel(request, project_id):
+    try:
+        project = Project.objects.get(id=project_id)
+        return render(request, 'paypal_payment.html', {
+            'project': project,
+            'payment_failed': True
+        })
+    except Project.DoesNotExist:
+        messages.error(request, "Project not found.")
+        return redirect('client_home')
+    
 
 @login_required
-def clock_in(request):
-    employee = request.user
-    existing_entry = TimeTracking.objects.filter(employee=employee, clock_out=None).first()
+def manage_tickets(request):
     
-    if existing_entry:
-        # If already clocked in, return a message or do something
-        pass
+    if request.method == 'POST':
+        form = TicketForm(request.POST)
+        if form.is_valid():
+            ticket = form.save(commit=False)
+            ticket.created_by = request.user
+            ticket.save()
+            return redirect('manage_tickets')
     else:
-        new_entry = TimeTracking(employee=employee, clock_in=timezone.now())
-        new_entry.save()
-    
-    return redirect('employee')  # Redirect to employee dashboard or wherever
+        form = TicketForm()
 
-@login_required
-def clock_out(request):
-    employee = request.user
-    entry = TimeTracking.objects.filter(employee=employee, clock_out=None).first()
-    
-    if entry:
-        entry.clock_out = timezone.now()
-        entry.total_time = entry.calculate_time()
-        entry.save()
-
-    return redirect('employee')  # Redirect to employee dashboard or wherever
+    completed_tickets = Ticket.objects.filter(created_by=request.user, status='Completed')
+    return render(request, 'manage_tickets.html', {'form': form, 'completed_tickets': completed_tickets})
